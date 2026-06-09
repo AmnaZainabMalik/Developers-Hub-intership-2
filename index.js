@@ -1,146 +1,173 @@
-const express = require('express');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const helmet = require('helmet');
-const winston = require('winston');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
+
+require("dotenv").config();
+
+const express = require("express");
+const helmet = require("helmet");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const cookieParser = require("cookie-parser");
+const csrf = require("csurf");
 
 const app = express();
+
+// ===============================
+// Middleware
+// ===============================
+
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
-const JWT_SECRET = "DHC-4044-SUPER-SECRET-KEY-2026";
-
-const logger = winston.createLogger({
-    level: 'info',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.json()
-    ),
-    transports: [
-        new winston.transports.File({ filename: 'security.log' })
-    ]
-});
-
-const failedLoginAttempts = {};
-
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
-    message: { error: 'Too many requests from this IP, please try again later.' }
-});
-app.use(globalLimiter);
-
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    message: { error: 'Brute-force protection: Too many login attempts. Automated lockout initiated.' }
-});
-
-const corsOptions = {
-    origin: ['http://localhost:3000', 'https://localhost:8443'], 
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-    optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
+// ===============================
+// Helmet Security Headers
+// ===============================
 
 app.use(
-    helmet({
-        contentSecurityPolicy: {
-            directives: {
-                defaultSrc: ["'self'"],
-                scriptSrc: ["'self'", "'trusted-cdn.com'"], 
-                styleSrc: ["'self'", "'fonts.googleapis.com'"],
-                imgSrc: ["'self'", "data:"],
-                connectSrc: ["'self'"],
-                upgradeInsecureRequests: [], 
-            },
-        },
-        hsts: {
-            maxAge: 31536000,
-            includeSubDomains: true,
-            preload: true
-        }
-    })
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:"],
+      },
+    },
+  })
 );
 
-// Delete the old static mockUser and replace it with this:
-const mockUser = {
-    username: "admin",
-    passwordHash: bcrypt.hashSync("admin123", 10) // Generates a flawless hash on startup
-};
+// ===============================
+// HSTS (HTTPS Enforcement)
+// ===============================
 
-app.post('/login', loginLimiter, async (req, res) => {
-    const { username, password } = req.body;
-    const clientIp = req.ip;
+app.use(
+  helmet.hsts({
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  })
+);
 
-    console.log("➡️ SERVER RECEIVED:", req.body);
+// ===============================
+// Secure CORS Configuration
+// ===============================
 
-    // Strict parameter evaluation
-    if (!username || !password) {
-        return res.status(400).json({ error: "Missing required identification parameters" });
-    }
+app.use(
+  cors({
+    origin: "http://localhost:3000", // Replace with your frontend URL
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  })
+);
 
-    // Secure authentication check via Bcrypt comparison
-    if (username === mockUser.username && await bcrypt.compare(password, mockUser.passwordHash)) {
-        failedLoginAttempts[clientIp] = 0; 
-        
-        const token = jwt.sign({ user: username }, JWT_SECRET, { expiresIn: '1h' });
-        logger.info({ message: `Successful authentication verified for user: ${username}`, ip: clientIp });
-        
-        return res.json({ token: token });
-    } else {
-        failedLoginAttempts[clientIp] = (failedLoginAttempts[clientIp] || 0) + 1;
-        logger.warn({ message: `Failed authentication validation attempt for user: ${username}`, ip: clientIp });
+// ===============================
+// Rate Limiting
+// ===============================
 
-        if (failedLoginAttempts[clientIp] >= 3) {
-            logger.error({ 
-                alert: "INTRUSION DETECTION ALERT", 
-                message: `Suspicious activity detected: ${failedLoginAttempts[clientIp]} consecutive failed logins from IP address: ${clientIp}`,
-                timestamp: new Date()
-            });
-        }
-
-        return res.status(401).json({ error: "Invalid credentials" });
-    }
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  message: {
+    success: false,
+    message: "Too many requests. Please try again later.",
+  },
 });
 
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+app.use(limiter);
 
-    if (!token) {
-        logger.warn({ message: "Unauthorized resource access blocked: Missing token parameter." });
-        return res.status(401).json({ error: "Access Denied: Missing authentication token" });
-    }
+// ===============================
+// CSRF Protection
+// ===============================
 
-    // ➡️ ADD THIS LINE HERE TO SNIFF THE TOKEN:
-    console.log("👀 SERVER IS CURRENTLY VERIFYING THIS TOKEN:", token.substring(0, 25) + "...");
-
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            console.log("❌ JWT VERIFICATION FAILED:", err.message);
-            return res.status(403).json({ error: "Access Denied: Invalid token", reason: err.message });
-        }
-        req.user = user;
-        next();
-    });
-};
-
-app.get('/list', authenticateToken, (req, res) => {
-    res.json({
-        status: "Success",
-        environment: "Production Secure Environment Backend",
-        data: ["System Profile", "Network Log Integrity Metrics", "Operational Logs"]
-    });
+const csrfProtection = csrf({
+  cookie: true,
 });
 
-const PORT = 3000;
+app.use(csrfProtection);
+
+// ===============================
+// API Key Authentication
+// ===============================
+
+const apiKeyAuth = (req, res, next) => {
+  const apiKey = req.header("x-api-key");
+
+  if (!apiKey || apiKey !== process.env.API_KEY) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized: Invalid API Key",
+    });
+  }
+
+  next();
+};
+
+// ===============================
+// Routes
+// ===============================
+
+// Health Check
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Secure API Running Successfully",
+  });
+});
+
+// CSRF Token Route
+app.get("/csrf-token", (req, res) => {
+  res.json({
+    csrfToken: req.csrfToken(),
+  });
+});
+
+// Protected API Route
+app.get("/secure-data", apiKeyAuth, (req, res) => {
+  res.json({
+    success: true,
+    data: "This is protected data.",
+  });
+});
+
+// Login Route Example
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  // Example only
+  if (username === "admin" && password === "password123") {
+    return res.json({
+      success: true,
+      message: "Login successful",
+    });
+  }
+
+  console.log(
+    `Failed login attempt from IP: ${req.ip} | Username: ${username}`
+  );
+
+  res.status(401).json({
+    success: false,
+    message: "Invalid credentials",
+  });
+});
+
+// Error Handler
+app.use((err, req, res, next) => {
+  if (err.code === "EBADCSRFTOKEN") {
+    return res.status(403).json({
+      success: false,
+      message: "Invalid CSRF Token",
+    });
+  }
+
+  next(err);
+});
+
+// ===============================
+// Start Server
+// ===============================
+
+const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
-    console.log(`\n==============================================`);
-    console.log(`🚀 SECURE SERVER IS ACTIVE AND RUNNING`);
-    console.log(`📡 Listening on: http://localhost:${PORT}`);
-    console.log(`==============================================\n`);
+  console.log(`Server running on port ${PORT}`);
 });
